@@ -83,11 +83,9 @@ object Pack extends sbt.Plugin {
   private def packArchiveTask = packArchive <<= (pack in Compile, name, version, streams, target, baseDirectory) map { (distDir, name, ver, out, target, base) =>
     val binDir = distDir / "bin"
     val archiveRoot = name + "-" + ver
-    val archiveName = archiveRoot + ".tar.gz"
+    val archiveName = archiveRoot + ".tar"
     out.log.info("Generating " + rpath(base, target / archiveName))
-    val tarfile = new TarOutputStream(new BufferedOutputStream(new GZIPOutputStream(new FileOutputStream(target / (archiveRoot + ".tar.gz"))) {
-      `def`.setLevel(Deflater.BEST_COMPRESSION)
-    }))
+    val tarfile = new TarOutputStream(new BufferedOutputStream(new FileOutputStream(target / (archiveName))))
     def tarEntry(src: File, dst: String) {
       val tarEntry = new TarEntry(src, dst)
       tarEntry.setIds(0, 0)
@@ -186,21 +184,20 @@ object Pack extends sbt.Plugin {
       val otherResourceDir = base / resourceDir
       val binScriptsDir = otherResourceDir / "bin"
 
-      def linkToScript(name:String) = 
-         "\t" + """ln -sf "../$(PROG)/current/bin/%s" "$(PREFIX)/bin/%s"""".format(name, name)
-
-      // Create Makefile
-      val makefile = {
-        val additinalScripts = (Option(binScriptsDir.listFiles) getOrElse Array.empty).map(_.getName)
-        val symlink = (mainTable.keys ++ additinalScripts).map(linkToScript).mkString("\n")
-        val globalVar = Map("PROG_NAME" -> name, "PROG_SYMLINK" -> symlink)
-        engine.layout("/xerial/sbt/template/Makefile.mustache", globalVar)
+      // Create Start
+      val start = {
+        val params = Map("PROG_NAME" -> name)
+        engine.layout("/xerial/sbt/template/start.mustache", params)
       }
-      write("Makefile", makefile)
+      write("start", start)
 
-      // Output the version number
-      write("VERSION", "version:=" + ver + "\n")
-
+            // Create Start
+      val install = {
+        val params = Map("PROG_NAME" -> name)
+        engine.layout("/xerial/sbt/template/install.mustache", params)
+      }
+      write("install", start)
+      
       // Copy other scripts
       IO.copyDirectory(otherResourceDir, distDir)
 
