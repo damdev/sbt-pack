@@ -54,12 +54,10 @@ object Pack extends sbt.Plugin {
     packAllClasspaths <<= (thisProjectRef, buildStructure) flatMap getFromAllProjects(dependencyClasspath.task in Runtime),
     packAllUnmanagedJars <<= (thisProjectRef, buildStructure, packExclude) flatMap getFromSelectedProjects(unmanagedJars.task in Compile),
     packLibJars <<= (thisProjectRef, buildStructure, packExclude) flatMap getFromSelectedProjects(packageBin.task in Runtime),
-    packUpdateReports <<= (thisProjectRef, buildStructure, packExclude) flatMap getFromSelectedProjects(update.task)
-  ) ++ Seq(packTask, packArchiveTask)
+    packUpdateReports <<= (thisProjectRef, buildStructure, packExclude) flatMap getFromSelectedProjects(update.task)) ++ Seq(packTask, packArchiveTask)
 
   private def getFromAllProjects[T](targetTask: SettingKey[Task[T]])(currentProject: ProjectRef, structure: Load.BuildStructure): Task[Seq[T]] =
     getFromSelectedProjects(targetTask)(currentProject, structure, Seq.empty)
-
 
   private def getFromSelectedProjects[T](targetTask: SettingKey[Task[T]])(currentProject: ProjectRef, structure: Load.BuildStructure, exclude: Seq[String]): Task[Seq[T]] = {
     def allProjectRefs(currentProject: ProjectRef): Seq[ProjectRef] = {
@@ -82,6 +80,7 @@ object Pack extends sbt.Plugin {
 
   private def packArchiveTask = packArchive <<= (pack in Compile, name, version, streams, target, baseDirectory) map { (distDir, name, ver, out, target, base) =>
     val binDir = distDir / "bin"
+    val tarFolder = "app"
     val archiveRoot = name + "-" + ver
     val archiveName = archiveRoot + ".tar"
     out.log.info("Generating " + rpath(base, target / archiveName))
@@ -91,17 +90,17 @@ object Pack extends sbt.Plugin {
       tarEntry.setIds(0, 0)
       tarEntry.setUserName("")
       tarEntry.setGroupName("")
-      if(src.getAbsolutePath startsWith binDir.getAbsolutePath)
+      if (src.canExecute())
         tarEntry.getHeader.mode = 0755
       tarfile.putNextEntry(tarEntry)
     }
-    tarEntry(new File("."), archiveRoot)
+    tarEntry(new File("."), tarFolder)
     val excludeFiles = Set("Makefile", "VERSION")
     val buffer = Array.fill(1024 * 1024)(0: Byte)
     def addFilesToTar(dir: File): Unit = dir.listFiles.
       filterNot(f => excludeFiles.contains(rpath(distDir, f))).foreach { file =>
-        tarEntry(file, archiveRoot ++ "/" ++ rpath(distDir, file))
-        if(file.isDirectory) addFilesToTar(file)
+        tarEntry(file, tarFolder ++ "/" ++ rpath(distDir, file))
+        if (file.isDirectory) addFilesToTar(file)
         else {
           def copy(input: InputStream): Unit = input.read(buffer) match {
             case length if length < 0 => input.close()
@@ -119,96 +118,112 @@ object Pack extends sbt.Plugin {
   }
 
   private def packTask = pack <<= (name, packMain, packDir, version, packLibJars, streams, target, baseDirectory, packUpdateReports, packMacIconFile, packResourceDir, packJvmOpts, packExtraClasspath, packAllUnmanagedJars) map {
-    (name, mainTable, packDir, ver, libs, out, target, base, reports, macIcon, resourceDir, jvmOpts, extraClasspath, unmanaged) => {
+    (name, mainTable, packDir, ver, libs, out, target, base, reports, macIcon, resourceDir, jvmOpts, extraClasspath, unmanaged) =>
+      {
 
-      val dependentJars = collection.immutable.SortedMap.empty[ModuleEntry, File] ++    (for {
+        val dependentJars = collection.immutable.SortedMap.empty[ModuleEntry, File] ++ (for {
           r <- reports
           c <- r.configurations if c.configuration == "runtime"
           m <- c.modules
-          (artifact, file) <- m.artifacts if DependencyFilter.allPass(c.configuration, m.module, artifact)} yield {
+          (artifact, file) <- m.artifacts if DependencyFilter.allPass(c.configuration, m.module, artifact)
+        } yield {
           val mid = m.module
           ModuleEntry(mid.organization, mid.name, mid.revision) -> file
         })
 
-      val distDir = target / packDir
-      out.log.info("Creating a distributable package in " + rpath(base, distDir))
-      IO.delete(distDir)
-      distDir.mkdirs()
+        val distDir = target / packDir
+        out.log.info("Creating a distributable package in " + rpath(base, distDir))
+        IO.delete(distDir)
+        distDir.mkdirs()
 
-      val libDir = distDir / "lib"
-      out.log.info("Copying libraries to " + rpath(base, libDir))
-      libDir.mkdirs()
-      out.log.info("project jars:\n" + libs.mkString("\n"))
-      libs.foreach(l => IO.copyFile(l, libDir / l.getName))
-      out.log.info("project dependencies:\n" + dependentJars.keys.mkString("\n"))
-      for ((m, f) <- dependentJars) {
-        IO.copyFile(f, libDir / "%s-%s.jar".format(m.name, m.revision))
+        val libDir = distDir / "lib"
+        out.log.info("Copying libraries to " + rpath(base, libDir))
+        libDir.mkdirs()
+        out.log.info("project jars:\n" + libs.mkString("\n"))
+        libs.foreach(l => IO.copyFile(l, libDir / l.getName))
+        out.log.info("project dependencies:\n" + dependentJars.keys.mkString("\n"))
+        for ((m, f) <- dependentJars) {
+          IO.copyFile(f, libDir / "%s-%s.jar".format(m.name, m.revision))
+        }
+        out.log.info("unmanaged dependencies:")
+        for (m <- unmanaged; um <- m; f = um.data) {
+          out.log.info(f.getPath)
+          IO.copyFile(f, libDir / f.getName)
+        }
+
+        val binDir = distDir / "bin"
+        out.log.info("Create a bin folder: " + rpath(base, binDir))
+        binDir.mkdirs()
+
+        def write(path: String, content: String) {
+          val p = distDir / path
+          out.log.info("Generating %s".format(rpath(base, p)))
+          IO.write(p, content)
+        }
+
+        // Create launch scripts
+        out.log.info("Generating launch scripts")
+        if (mainTable.isEmpty) {
+          out.log.warn("No mapping (progran name) -> MainClass is defined. Please set packMain variable (Map[String, String]) in your sbt project settings.")
+        }
+
+        val engine = new TemplateEngine
+
+        for ((name, mainClass) <- mainTable) {
+          out.log.info("main class for %s: %s".format(name, mainClass))
+          val m = Map(
+            "PROG_NAME" -> name,
+            "MAIN_CLASS" -> mainClass,
+            "MAC_ICON_FILE" -> macIcon,
+            "JVM_OPTS" -> jvmOpts.getOrElse(name, Nil).map("\"%s\"".format(_)).mkString(" "),
+            "EXTRA_CLASSPATH" -> extraClasspath.get(name).map(_.mkString("", pathSeparator, pathSeparator)).orElse(Some("")).get)
+          val launchScript = engine.layout("/xerial/sbt/template/launch.mustache", m)
+          val progName = m("PROG_NAME").replaceAll(" ", "") // remove white spaces
+          write("bin/%s".format(progName), launchScript)
+        }
+
+        val otherResourceDir = base / resourceDir
+        val binScriptsDir = otherResourceDir / "bin"
+
+        createCloudiaScripts(name, engine, distDir).foreach({
+          case (key: String, value: String) => {
+            write(key, value)
+            (distDir / key).setExecutable(true, false)
+          }
+        })
+
+        // Copy other scripts
+        IO.copyDirectory(otherResourceDir, distDir)
+
+        // chmod +x the scripts in bin directory
+        binDir.listFiles.foreach(_.setExecutable(true, false))
+
+        out.log.info("done.")
+        distDir
+
       }
-      out.log.info("unmanaged dependencies:")
-      for(m <- unmanaged; um <- m; f = um.data) {
-        out.log.info(f.getPath)
-        IO.copyFile(f, libDir / f.getName)
-      }
-
-      val binDir = distDir / "bin"
-      out.log.info("Create a bin folder: " + rpath(base, binDir))
-      binDir.mkdirs()
-
-      def write(path: String, content: String) {
-        val p = distDir / path
-        out.log.info("Generating %s".format(rpath(base, p)))
-        IO.write(p, content)
-      }
-
-      // Create launch scripts
-      out.log.info("Generating launch scripts")
-      if (mainTable.isEmpty) {
-        out.log.warn("No mapping (progran name) -> MainClass is defined. Please set packMain variable (Map[String, String]) in your sbt project settings.")
-      }
-
-      val engine = new TemplateEngine
-
-      for ((name, mainClass) <- mainTable) {
-        out.log.info("main class for %s: %s".format(name, mainClass))
-        val m = Map(
-          "PROG_NAME" -> name,
-          "MAIN_CLASS" -> mainClass,
-          "MAC_ICON_FILE" -> macIcon,
-          "JVM_OPTS" -> jvmOpts.getOrElse(name, Nil).map("\"%s\"".format(_)).mkString(" "),
-          "EXTRA_CLASSPATH" -> extraClasspath.get(name).map(_.mkString("", pathSeparator, pathSeparator)).orElse(Some("")).get)
-        val launchScript = engine.layout("/xerial/sbt/template/launch.mustache", m)
-        val progName = m("PROG_NAME").replaceAll(" ", "") // remove white spaces
-        write("bin/%s".format(progName), launchScript)
-      }
-
-      val otherResourceDir = base / resourceDir
-      val binScriptsDir = otherResourceDir / "bin"
-
-      // Create Start
-      val start = {
-        val params = Map("PROG_NAME" -> name)
-        engine.layout("/xerial/sbt/template/start.mustache", params)
-      }
-      write("start", start)
-
-            // Create Start
-      val install = {
-        val params = Map("PROG_NAME" -> name)
-        engine.layout("/xerial/sbt/template/install.mustache", params)
-      }
-      write("install", start)
-      
-      // Copy other scripts
-      IO.copyDirectory(otherResourceDir, distDir)
-
-      // chmod +x the scripts in bin directory
-      binDir.listFiles.foreach(_.setExecutable(true, false))
-
-      out.log.info("done.")
-      distDir
-   }
   }
 
+  def createCloudiaScripts(name: String, engine: TemplateEngine, distDir: File): Map[String, String] = {
+    // Create start
+    val start = {
+      val params = Map("PROG_NAME" -> name)
+      engine.layout("/xerial/sbt/template/start.mustache", params)
+    }
 
+    // Create stop
+    val stop = {
+      val params = Map("PROG_NAME" -> name)
+      engine.layout("/xerial/sbt/template/stop.mustache", params)
+    }
+
+    // Create install
+    val install = {
+      val params = Map("PROG_NAME" -> name)
+      engine.layout("/xerial/sbt/template/install.mustache", params)
+    }
+
+    Map("start" -> start, "stop" -> stop, "install" -> install)
+  }
 }
 

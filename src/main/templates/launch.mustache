@@ -126,4 +126,6 @@ fi
 
 PROG_NAME={{{PROG_NAME}}}
 
+echo $$ > app.pid
+
 exec "$JAVACMD" ${JVM_OPT} {{{JVM_OPTS}}} -cp "{{{EXTRA_CLASSPATH}}}${PROG_HOME}/lib/*${CLASSPATH_SUFFIX}" -Dprog.home="${PROG_HOME}" {{{MAIN_CLASS}}} $@
